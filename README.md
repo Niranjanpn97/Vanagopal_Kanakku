@@ -48,7 +48,8 @@ Owners sign in with a temporary password and must change it first.
 
 1. Import this GitHub repo as a Vercel project. `vercel.json` already serves `public/` statically
    and routes `/api/*` to one serverless function.
-2. In the project's **Storage** tab, create a **Neon** Postgres database (free tier) and connect it.
+2. In the project's **Storage** tab, create a **Neon** Postgres database (free tier) in the
+   **Singapore (aws-ap-southeast-1)** region and connect it. Functions run in Singapore (`sin1`, see `vercel.json`) to stay close to the DB and to India.
    This sets `DATABASE_URL` automatically. Tables are created on first request.
 3. Add a `SETUP_TOKEN` environment variable with a long random value, then redeploy.
 4. Open the site. It shows **Create the first admin**. Enter the setup code and your details.

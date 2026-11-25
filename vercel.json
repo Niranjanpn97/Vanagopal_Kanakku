@@ -4,6 +4,9 @@
   "installCommand": "npm ci",
   "buildCommand": "",
   "outputDirectory": "public",
+  "regions": [
+    "sin1"
+  ],
   "functions": {
     "api/index.js": {
       "maxDuration": 30,

@@ -1,0 +1,30 @@
+{
+  "name": "vanagopal-kanakku",
+  "version": "1.0.0",
+  "description": "Apartment maintenance accounts for Vanagopal Enclave",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --no-warnings src/server.js",
+    "test": "node --no-warnings --test test/*.test.js",
+    "create-admin": "node --no-warnings scripts/create-admin.js",
+    "import-xlsx": "node --no-warnings scripts/import-xlsx.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Niranjanpn97/Vanagopal_Kanakku.git"
+  },
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Niranjanpn97/Vanagopal_Kanakku/issues"
+  },
+  "homepage": "https://github.com/Niranjanpn97/Vanagopal_Kanakku#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  }
+}

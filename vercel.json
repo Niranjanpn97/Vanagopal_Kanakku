@@ -1,9 +1,19 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci",
   "buildCommand": "",
   "outputDirectory": "public",
   "functions": {
-    "api/index.js": { "maxDuration": 30, "includeFiles": "src/**" }
+    "api/index.js": {
+      "maxDuration": 30,
+      "includeFiles": "src/**"
+    }
   },
-  "rewrites": [{ "source": "/api/(.*)", "destination": "/api/index" }]
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    }
+  ]
 }

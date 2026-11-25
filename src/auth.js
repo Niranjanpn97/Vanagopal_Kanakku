@@ -4,20 +4,25 @@ const bcrypt = require('bcryptjs');
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const COOKIE = 'vk_session';
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX = 10;
 
-function hashPassword(pw) { return bcrypt.hashSync(pw, 10); }
-function checkPassword(pw, hash) { return bcrypt.compareSync(pw, hash); }
+const hashPassword = (pw) => bcrypt.hash(pw, 10);
+const checkPassword = (pw, hash) => bcrypt.compare(pw, hash);
 
 function validatePassword(pw) {
   if (typeof pw !== 'string' || pw.length < 8) return 'Password must be at least 8 characters';
   return null;
 }
 
-function createSession(db, userId) {
+// Tokens are stored hashed so a leaked DB backup can't be used to hijack sessions.
+const tokenHash = (t) => crypto.createHash('sha256').update(t).digest('hex');
+
+async function createSession(db, userId) {
   const token = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)')
-    .run(token, userId, Date.now() + SESSION_TTL_MS);
-  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+  await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)',
+    [tokenHash(token), userId, Date.now() + SESSION_TTL_MS]);
+  await db.run('DELETE FROM sessions WHERE expires_at < $1', [Date.now()]);
   return token;
 }
 
@@ -39,15 +44,21 @@ function cookieHeader(token, { secure, clear } = {}) {
 }
 
 /** Express middleware: attaches req.user if a valid session cookie is present. */
-function loadUser(db) {
-  const q = db.prepare(`
-    SELECT u.id, u.username, u.display_name, u.role, u.flat_id, u.must_change_password, s.token
-    FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.token = ? AND s.expires_at > ? AND u.active = 1`);
-  return (req, _res, next) => {
-    const token = parseCookies(req.headers.cookie)[COOKIE];
-    req.user = token ? q.get(token, Date.now()) || null : null;
-    next();
+function loadUser(getDb) {
+  return async (req, _res, next) => {
+    try {
+      const token = parseCookies(req.headers.cookie)[COOKIE];
+      req.user = null;
+      if (token) {
+        const db = await getDb();
+        const u = await db.get(`
+          SELECT u.id, u.username, u.display_name, u.role, u.flat_id, u.must_change_password, s.token
+          FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.token = $1 AND s.expires_at > $2 AND u.active`, [tokenHash(token), Date.now()]);
+        req.user = u || null;
+      }
+      next();
+    } catch (e) { next(e); }
   };
 }
 
@@ -62,19 +73,24 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Very small in-memory limiter for login attempts (per IP + username).
-const attempts = new Map();
-function loginLimited(key) {
+async function loginLimited(db, key) {
   const now = Date.now();
-  const a = attempts.get(key) || { n: 0, reset: now + 15 * 60 * 1000 };
-  if (now > a.reset) { a.n = 0; a.reset = now + 15 * 60 * 1000; }
-  attempts.set(key, a);
-  return a.n >= 10;
+  const r = await db.get('SELECT n, reset_at FROM login_attempts WHERE key = $1', [key]);
+  return !!r && r.reset_at > now && r.n >= LOGIN_MAX;
 }
-function loginFailed(key) { const a = attempts.get(key); if (a) a.n++; }
-function loginOk(key) { attempts.delete(key); }
+async function loginFailed(db, key) {
+  const now = Date.now();
+  await db.run(`INSERT INTO login_attempts (key, n, reset_at) VALUES ($1, 1, $2)
+    ON CONFLICT (key) DO UPDATE SET
+      n = CASE WHEN login_attempts.reset_at < $3 THEN 1 ELSE login_attempts.n + 1 END,
+      reset_at = CASE WHEN login_attempts.reset_at < $3 THEN $2 ELSE login_attempts.reset_at END`,
+  [key, now + LOGIN_WINDOW_MS, now]);
+}
+async function loginOk(db, key) {
+  await db.run('DELETE FROM login_attempts WHERE key = $1 OR reset_at < $2', [key, Date.now()]);
+}
 
 module.exports = {
-  COOKIE, hashPassword, checkPassword, validatePassword, createSession, cookieHeader,
+  COOKIE, hashPassword, checkPassword, validatePassword, createSession, cookieHeader, tokenHash,
   loadUser, requireAuth, requireAdmin, loginLimited, loginFailed, loginOk,
 };

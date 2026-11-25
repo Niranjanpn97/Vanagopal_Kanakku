@@ -2,7 +2,7 @@
 // Import from / export to the association's existing Excel layout
 // (sheets: Income_Expense, Apartment_Info, Summary).
 const ExcelJS = require('exceljs');
-const { tx, audit } = require('./db');
+const { audit } = require('./db');
 const ledger = require('./ledger');
 
 const toPaise = (v) => {
@@ -56,75 +56,90 @@ async function importWorkbook(db, buffer, { userId, mode = 'append' } = {}) {
 
   const result = { flats: 0, categories: 0, transactions: 0, errors: [] };
 
-  tx(db, () => {
-    const upsertFlat = db.prepare(`INSERT INTO flats (code, owner_name) VALUES (?, ?)
-      ON CONFLICT(code) DO UPDATE SET owner_name = excluded.owner_name`);
-    const insCat = db.prepare('INSERT OR IGNORE INTO categories (name) VALUES (?)');
-
-    if (info) {
-      info.eachRow((row, i) => {
-        if (i === 1) return;
-        const code = cellValue(row.getCell(1));
-        const label = cellValue(row.getCell(2));
-        if (code && label) {
-          const s = splitFlatLabel(label);
-          upsertFlat.run(String(code).trim().toUpperCase(), s ? s.name : String(label).trim());
-          result.flats++;
-        }
-        const cat = cellValue(row.getCell(6));
-        if (cat && insCat.run(String(cat).trim()).changes) result.categories++;
-      });
-    }
-
-    if (mode === 'replace') db.exec('DELETE FROM transactions');
-
-    const flatByCode = db.prepare('SELECT id FROM flats WHERE code = ?');
-    const catByName = db.prepare('SELECT id FROM categories WHERE name = ? COLLATE NOCASE');
-    const ins = db.prepare(`INSERT INTO transactions
-      (txn_date, month, type, flat_id, category_id, description, maint_paise, corpus_paise, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-
-    ledgerWs.eachRow((row, i) => {
-      if (i <= 2) return; // two header rows
-      const typeRaw = cellValue(row.getCell(4));
-      if (!typeRaw) return; // empty/formula-only row
-      try {
-        const type = String(typeRaw).toUpperCase().startsWith('INC') ? 'INC'
-          : String(typeRaw).toUpperCase().startsWith('EXP') ? 'EXP' : null;
-        if (!type) throw new Error(`Unknown Tran. Type "${typeRaw}"`);
-        const date = isoDate(cellValue(row.getCell(3)));
-        if (!date) throw new Error('Missing/invalid Date');
-        const monthIso = isoDate(cellValue(row.getCell(2)));
-        const month = (monthIso || date).slice(0, 7);
-        let flatId = null, catId = null, maint, corpus;
-        const desc = String(cellValue(row.getCell(9)) || '').trim();
-        if (type === 'INC') {
-          const s = splitFlatLabel(cellValue(row.getCell(5)));
-          if (!s) throw new Error(`Cannot read flat from "${cellValue(row.getCell(5))}"`);
-          let f = flatByCode.get(s.code);
-          if (!f) { upsertFlat.run(s.code, s.name); f = flatByCode.get(s.code); result.flats++; }
-          flatId = f.id;
-          maint = toPaise(cellValue(row.getCell(6)));
-          corpus = toPaise(cellValue(row.getCell(7)));
-        } else {
-          const name = String(cellValue(row.getCell(8)) || 'Other').trim();
-          let c = catByName.get(name);
-          if (!c) { insCat.run(name); c = catByName.get(name); result.categories++; }
-          catId = c.id;
-          maint = toPaise(cellValue(row.getCell(10)));
-          corpus = toPaise(cellValue(row.getCell(11)));
-        }
-        if (maint + corpus === 0) throw new Error('Amount is zero');
-        ins.run(date, month, type, flatId, catId, desc, maint, corpus, userId ?? null);
-        result.transactions++;
-      } catch (e) {
-        result.errors.push(`Row ${i}: ${e.message}`);
+  // 1) Parse everything in memory first (Postgres aborts a transaction on the first error,
+  //    so all validation happens before touching the database).
+  const infoFlats = [];
+  const infoCats = [];
+  if (info) {
+    info.eachRow((row, i) => {
+      if (i === 1) return;
+      const code = cellValue(row.getCell(1));
+      const label = cellValue(row.getCell(2));
+      if (code && label) {
+        const sp = splitFlatLabel(label);
+        infoFlats.push({ code: String(code).trim().toUpperCase(), name: sp ? sp.name : String(label).trim() });
       }
+      const cat = cellValue(row.getCell(6));
+      if (cat) infoCats.push(String(cat).trim());
     });
-    if (result.errors.length && mode === 'replace') {
-      throw Object.assign(new Error('Import aborted'), { details: result.errors });
+  }
+
+  const entries = [];
+  ledgerWs.eachRow((row, i) => {
+    if (i <= 2) return; // two header rows
+    const typeRaw = cellValue(row.getCell(4));
+    if (!typeRaw) return; // empty/formula-only row
+    try {
+      const up = String(typeRaw).toUpperCase();
+      const type = up.startsWith('INC') ? 'INC' : up.startsWith('EXP') ? 'EXP' : null;
+      if (!type) throw new Error(`Unknown Tran. Type "${typeRaw}"`);
+      const date = isoDate(cellValue(row.getCell(3)));
+      if (!date) throw new Error('Missing/invalid Date');
+      const month = (isoDate(cellValue(row.getCell(2))) || date).slice(0, 7);
+      const e = { row: i, type, date, month, desc: String(cellValue(row.getCell(9)) || '').trim() };
+      if (type === 'INC') {
+        const sp = splitFlatLabel(cellValue(row.getCell(5)));
+        if (!sp) throw new Error(`Cannot read flat from "${cellValue(row.getCell(5))}"`);
+        e.flat = sp;
+        e.maint = toPaise(cellValue(row.getCell(6)));
+        e.corpus = toPaise(cellValue(row.getCell(7)));
+      } else {
+        e.category = String(cellValue(row.getCell(8)) || 'Other').trim();
+        e.maint = toPaise(cellValue(row.getCell(10)));
+        e.corpus = toPaise(cellValue(row.getCell(11)));
+      }
+      if (e.maint + e.corpus === 0) throw new Error('Amount is zero');
+      entries.push(e);
+    } catch (err) {
+      result.errors.push(`Row ${i}: ${err.message}`);
     }
-    audit(db, userId, 'import', 'transactions', null, { mode, ...result });
+  });
+  if (result.errors.length && mode === 'replace') {
+    throw Object.assign(new Error('Import aborted, nothing was changed'), { details: result.errors });
+  }
+
+  // 2) Write in a single transaction.
+  await db.tx(async (t) => {
+    const upsertFlat = (code, name) => t.run(`INSERT INTO flats (code, owner_name) VALUES ($1, $2)
+      ON CONFLICT (code) DO UPDATE SET owner_name = EXCLUDED.owner_name`, [code, name]);
+    const flatId = async (code, name) => {
+      let f = await t.get('SELECT id FROM flats WHERE code = $1', [code]);
+      if (!f) { await upsertFlat(code, name); f = await t.get('SELECT id FROM flats WHERE code = $1', [code]); result.flats++; }
+      return f.id;
+    };
+    const catId = async (name) => {
+      let c = await t.get('SELECT id FROM categories WHERE lower(name) = lower($1)', [name]);
+      if (!c) {
+        c = await t.get('INSERT INTO categories (name) VALUES ($1) RETURNING id', [name]);
+        result.categories++;
+      }
+      return c.id;
+    };
+
+    for (const f of infoFlats) { await upsertFlat(f.code, f.name); result.flats++; }
+    for (const c of infoCats) await catId(c);
+    if (mode === 'replace') await t.run('DELETE FROM transactions');
+
+    for (const e of entries) {
+      const fid = e.type === 'INC' ? await flatId(e.flat.code, e.flat.name) : null;
+      const cid = e.type === 'EXP' ? await catId(e.category) : null;
+      await t.run(`INSERT INTO transactions
+        (txn_date, month, type, flat_id, category_id, description, maint_paise, corpus_paise, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [e.date, e.month, e.type, fid, cid, e.desc, e.maint, e.corpus, userId ?? null]);
+      result.transactions++;
+    }
+    await audit(t, userId, 'import', 'transactions', null, { mode, ...result });
   });
   return result;
 }
@@ -149,7 +164,7 @@ async function exportWorkbook(db, settings) {
     'Paid from Corpus Fund', 'Running Balance\nin Maintenance', 'Running Balance\nin Corpus Fund']);
   ws.getRow(1).font = { bold: true };
   ws.getRow(2).font = { bold: true };
-  const rows = ledger.listWithBalances(db);
+  const rows = await ledger.listWithBalances(db);
   rows.forEach((t, i) => {
     const r = i + 3;
     const inc = t.type === 'INC';
@@ -174,8 +189,8 @@ async function exportWorkbook(db, settings) {
   // --- Apartment_Info ---
   info.addRow(['Flat NO', 'Owner', '', 'Source of Fund', '', 'Expense Category', '', 'Tran. Type']);
   info.getRow(1).font = { bold: true };
-  const flats = db.prepare('SELECT code, owner_name FROM flats WHERE active = 1 ORDER BY code').all();
-  const cats = db.prepare('SELECT name FROM categories WHERE active = 1 ORDER BY id').all();
+  const flats = await db.all('SELECT code, owner_name FROM flats WHERE active ORDER BY code');
+  const cats = await db.all('SELECT name FROM categories WHERE active ORDER BY id');
   const funds = ['Maint. Fund', 'Corpus Fund'];
   const types = ['INC.', 'EXP.'];
   const n = Math.max(flats.length, cats.length, 2);
@@ -189,7 +204,7 @@ async function exportWorkbook(db, settings) {
   info.getColumn(6).width = 22;
 
   // --- Summary (static values, month-wise) ---
-  const sum = ledger.summary(db);
+  const sum = await ledger.summary(db);
   s.addRow([`${settings.association_name || ''} Apartment Maintenance Accounts`]).font = { bold: true, size: 14 };
   s.addRow([]);
   s.addRow(['Month', 'Income: Maint. Fund', 'Income: Corpus Fund', 'Expense: Maint. Fund', 'Expense: Corpus Fund'])

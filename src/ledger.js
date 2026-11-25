@@ -9,19 +9,14 @@ const TXN_SELECT = `
   LEFT JOIN flats f ON f.id = t.flat_id
   LEFT JOIN categories c ON c.id = t.category_id`;
 
-function signed(t) {
-  const s = t.type === 'INC' ? 1 : -1;
-  return { m: s * t.maint_paise, c: s * t.corpus_paise };
-}
-
 /** All transactions in ledger order with running balances (same as columns L/M in the sheet). */
-function listWithBalances(db, filters = {}) {
-  const rows = db.prepare(`${TXN_SELECT} ORDER BY t.txn_date, t.id`).all();
+async function listWithBalances(db, filters = {}) {
+  const rows = await db.all(`${TXN_SELECT} ORDER BY t.txn_date, t.id`);
   let m = 0, c = 0;
   const out = [];
   for (const r of rows) {
-    const d = signed(r);
-    m += d.m; c += d.c;
+    const s = r.type === 'INC' ? 1 : -1;
+    m += s * r.maint_paise; c += s * r.corpus_paise;
     r.running_maint_paise = m;
     r.running_corpus_paise = c;
     if (filters.month && r.month !== filters.month) continue;
@@ -36,39 +31,39 @@ function listWithBalances(db, filters = {}) {
 }
 
 function getOne(db, id) {
-  return db.prepare(`${TXN_SELECT} WHERE t.id = ?`).get(id);
+  return db.get(`${TXN_SELECT} WHERE t.id = $1`, [id]);
 }
 
-function balances(db) {
-  const r = db.prepare(`
+async function balances(db) {
+  const r = await db.get(`
     SELECT
-      COALESCE(SUM(CASE WHEN type='INC' THEN maint_paise ELSE -maint_paise END),0) AS maint,
-      COALESCE(SUM(CASE WHEN type='INC' THEN corpus_paise ELSE -corpus_paise END),0) AS corpus
-    FROM transactions`).get();
+      COALESCE(SUM(CASE WHEN type='INC' THEN maint_paise ELSE -maint_paise END),0)::bigint AS maint,
+      COALESCE(SUM(CASE WHEN type='INC' THEN corpus_paise ELSE -corpus_paise END),0)::bigint AS corpus
+    FROM transactions`);
   return { maint_paise: r.maint, corpus_paise: r.corpus };
 }
 
 /** Month-wise pivot, equivalent to the Summary sheet. */
-function summary(db, { from, to } = {}) {
+async function summary(db, { from, to } = {}) {
   const where = [];
   const args = [];
-  if (from) { where.push('t.month >= ?'); args.push(from); }
-  if (to) { where.push('t.month <= ?'); args.push(to); }
-  const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  if (from) { args.push(from); where.push(`t.month >= $${args.length}`); }
+  if (to) { args.push(to); where.push(`t.month <= $${args.length}`); }
+  const w = (type) => `WHERE t.type='${type}'${where.length ? ` AND ${where.join(' AND ')}` : ''}`;
 
-  const income = db.prepare(`
+  const income = await db.all(`
     SELECT t.month, f.code AS flat_code, f.owner_name,
-           SUM(t.maint_paise) AS maint_paise, SUM(t.corpus_paise) AS corpus_paise
+           SUM(t.maint_paise)::bigint AS maint_paise, SUM(t.corpus_paise)::bigint AS corpus_paise
     FROM transactions t JOIN flats f ON f.id = t.flat_id
-    ${w ? w + " AND t.type='INC'" : "WHERE t.type='INC'"}
-    GROUP BY t.month, f.id ORDER BY t.month DESC, f.code`).all(...args);
+    ${w('INC')}
+    GROUP BY t.month, f.id, f.code, f.owner_name ORDER BY t.month DESC, f.code`, args);
 
-  const expense = db.prepare(`
+  const expense = await db.all(`
     SELECT t.month, c.name AS category,
-           SUM(t.maint_paise) AS maint_paise, SUM(t.corpus_paise) AS corpus_paise
+           SUM(t.maint_paise)::bigint AS maint_paise, SUM(t.corpus_paise)::bigint AS corpus_paise
     FROM transactions t JOIN categories c ON c.id = t.category_id
-    ${w ? w + " AND t.type='EXP'" : "WHERE t.type='EXP'"}
-    GROUP BY t.month, c.id ORDER BY t.month DESC, c.name`).all(...args);
+    ${w('EXP')}
+    GROUP BY t.month, c.id, c.name ORDER BY t.month DESC, c.name`, args);
 
   const months = new Map();
   const get = (mo) => {
@@ -99,22 +94,22 @@ function summary(db, { from, to } = {}) {
     a.expense_corpus_paise += g.expense_corpus_paise;
     return a;
   }, { income_maint_paise: 0, income_corpus_paise: 0, expense_maint_paise: 0, expense_corpus_paise: 0 });
-  return { months: list, totals, balances: balances(db) };
+  return { months: list, totals, balances: await balances(db) };
 }
 
 /** Per-flat dues for a month: expected (from settings) vs collected. */
-function dues(db, month, settings) {
+async function dues(db, month, settings) {
   const dueM = Number(settings.monthly_maint_due_paise || 0);
   const dueC = Number(settings.monthly_corpus_due_paise || 0);
-  const rows = db.prepare(`
+  const rows = await db.all(`
     SELECT f.id AS flat_id, f.code AS flat_code, f.owner_name,
-           COALESCE(SUM(t.maint_paise),0) AS paid_maint_paise,
-           COALESCE(SUM(t.corpus_paise),0) AS paid_corpus_paise,
+           COALESCE(SUM(t.maint_paise),0)::bigint AS paid_maint_paise,
+           COALESCE(SUM(t.corpus_paise),0)::bigint AS paid_corpus_paise,
            MAX(t.txn_date) AS last_paid_on
     FROM flats f
-    LEFT JOIN transactions t ON t.flat_id = f.id AND t.type = 'INC' AND t.month = ?
-    WHERE f.active = 1
-    GROUP BY f.id ORDER BY f.code`).all(month);
+    LEFT JOIN transactions t ON t.flat_id = f.id AND t.type = 'INC' AND t.month = $1
+    WHERE f.active
+    GROUP BY f.id, f.code, f.owner_name ORDER BY f.code`, [month]);
   return rows.map((r) => {
     const pendM = Math.max(0, dueM - r.paid_maint_paise);
     const pendC = Math.max(0, dueC - r.paid_corpus_paise);

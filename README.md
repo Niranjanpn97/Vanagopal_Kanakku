@@ -21,7 +21,8 @@ period the payment belongs to, so advance and late payments land in the right mo
 
 ## Run locally
 
-Requires Node.js 22.13 or newer. The app uses Node's built-in SQLite, so there is no native build.
+Requires Node.js 22+. Without `DATABASE_URL`, the app uses an embedded Postgres (PGlite)
+stored in `data/pglite/`, so you don't need to install a database.
 
 ```bash
 npm install
@@ -37,24 +38,31 @@ Owners sign in with a temporary password and must change it first.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `PORT` | `3000` | |
-| `DB_FILE` | `data/kanakku.db` | SQLite file. **Back this up.** It is the whole database. |
-| `SECURE_COOKIES` | unset | Set to `1` when served over HTTPS. |
-| `TRUST_PROXY` | unset | Set to `1` behind a reverse proxy, so login rate-limiting sees real client IPs. |
+| `DATABASE_URL` | unset | Postgres connection string (Neon on Vercel). If unset, the embedded DB is used. **Required on Vercel.** |
+| `SETUP_TOKEN` | unset | Enables the one-time "create first admin" screen. It stops working once an admin exists. |
+| `PORT` | `3000` | Local server only. |
+| `SECURE_COOKIES` | auto on Vercel | Set to `1` when self-hosting over HTTPS. |
+| `TRUST_PROXY` | auto on Vercel | Set to `1` behind a reverse proxy. |
 
-## Deploying
+## Deploying on Vercel
 
-The data lives in a single SQLite file, so the host needs a **persistent disk**.
-Serverless platforms (Vercel, Netlify functions) will lose data. Suitable options:
-a small VPS, Railway or Render with a volume, Fly.io with a volume, or a Raspberry Pi at home.
+1. Import this GitHub repo as a Vercel project. `vercel.json` already serves `public/` statically
+   and routes `/api/*` to one serverless function.
+2. In the project's **Storage** tab, create a **Neon** Postgres database (free tier) and connect it.
+   This sets `DATABASE_URL` automatically. Tables are created on first request.
+3. Add a `SETUP_TOKEN` environment variable with a long random value, then redeploy.
+4. Open the site. It shows **Create the first admin**. Enter the setup code and your details.
+   After that the setup screen is permanently disabled. You can delete `SETUP_TOKEN`.
+5. As admin, go to **Flats & Settings → Import from Excel** to load the existing workbook, then create owner logins.
+
+Backups: Neon keeps point-in-time history, and **Download Excel** gives a full copy of every entry.
+
+### Self-hosting (alternative)
 
 ```bash
 docker build -t kanakku .
 docker run -d -p 3000:3000 -v kanakku-data:/app/data -e SECURE_COOKIES=1 kanakku
-docker exec -it <container> node scripts/create-admin.js admin 'a-strong-password'
 ```
-
-Back up by copying `data/kanakku.db`, or use **Download Excel**, which includes every entry.
 
 ## Tests
 
@@ -66,11 +74,12 @@ SAMPLE_XLSX=path/to/Vanagopal_Enclave_Accounts.xlsx npm test   # also checks imp
 ## Layout
 
 ```
-src/db.js       schema (amounts stored in paise), settings, audit log
+src/db.js       Postgres schema (amounts in paise), pg / PGlite connection, audit log
 src/ledger.js   running balances, month summary, dues
 src/excel.js    import/export in the original workbook format
 src/auth.js     password hashing, sessions, role checks
 src/app.js      REST API (/api/...)
 public/         single-page UI (plain JS, no build step)
+api/index.js    Vercel serverless entry
 scripts/        create-admin, import-xlsx
 ```

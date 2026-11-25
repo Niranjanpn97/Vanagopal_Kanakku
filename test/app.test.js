@@ -6,18 +6,32 @@ const path = require('node:path');
 const ExcelJS = require('exceljs');
 const { createApp } = require('../src/app');
 const { hashPassword } = require('../src/auth');
+const { connect } = require('../src/db');
 
-let server, base;
+let server, base, db;
 before(async () => {
-  const app = createApp({ dbFile: ':memory:' });
-  const db = app.locals.db;
-  db.prepare("INSERT INTO users (username, display_name, password_hash, role, must_change_password) VALUES ('admin','Admin',?, 'admin',0)").run(hashPassword('adminpass1'));
-  db.prepare("INSERT INTO users (username, display_name, password_hash, role) VALUES ('owner','Owner',?, 'owner')").run(hashPassword('ownerpass1'));
-  db.prepare("INSERT INTO flats (code, owner_name) VALUES ('F1','A'),('F2','B')").run();
+  db = await connect({ databaseUrl: '', dataDir: ':memory:' });
+  const app = createApp({ db, setupToken: 'setup-secret-123', secureCookies: false });
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}/api`;
 });
-after(() => server.close());
+after(async () => { server.close(); await db.close(); });
+
+const json = (method, p, body, cookie) => fetch(`${base}${p}`, {
+  method, headers: { 'Content-Type': 'application/json', ...(cookie ? { cookie } : {}) }, body: body ? JSON.stringify(body) : undefined,
+});
+
+test('first-run setup creates the admin exactly once', async () => {
+  assert.deepEqual(await (await fetch(`${base}/setup`)).json(), { needs_setup: true, setup_enabled: true });
+  assert.equal((await json('POST', '/setup', { setup_token: 'wrong', username: 'admin', password: 'adminpass1' })).status, 403);
+  const r = await json('POST', '/setup', { setup_token: 'setup-secret-123', username: 'admin', display_name: 'Admin', password: 'adminpass1' });
+  assert.equal(r.status, 200, await r.text());
+  assert.equal((await json('POST', '/setup', { setup_token: 'setup-secret-123', username: 'evil', password: 'evilpass1' })).status, 409);
+  assert.equal((await (await fetch(`${base}/setup`)).json()).needs_setup, false);
+  // seed fixtures for the remaining tests
+  await db.run("INSERT INTO users (username, display_name, password_hash, role) VALUES ('owner','Owner',$1,'owner')", [await hashPassword('ownerpass1')]);
+  await db.run("INSERT INTO flats (code, owner_name) VALUES ('F1','A'),('F2','B')");
+});
 
 async function login(u, p) {
   const r = await fetch(`${base}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
@@ -30,6 +44,7 @@ const call = (cookie, method, p, body) => fetch(`${base}${p}`, {
 
 test('unauthenticated requests are rejected', async () => {
   assert.equal((await fetch(`${base}/transactions`)).status, 401);
+  assert.equal((await json('POST', '/transactions', { type: 'EXP' })).status, 401);
 });
 
 test('wrong password rejected', async () => {

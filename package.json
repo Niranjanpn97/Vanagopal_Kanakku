@@ -19,12 +19,14 @@
   },
   "homepage": "https://github.com/Niranjanpn97/Vanagopal_Kanakku#readme",
   "dependencies": {
+    "@electric-sql/pglite": "^0.6.0",
     "bcryptjs": "^3.0.3",
     "exceljs": "^4.4.0",
-    "express": "^5.3.0"
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
   },
   "private": true,
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22"
   }
 }

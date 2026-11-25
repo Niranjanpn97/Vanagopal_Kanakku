@@ -103,6 +103,8 @@ $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') clos
 // ---------------- Login ----------------
 async function viewLogin(el) {
   $('#topbar').hidden = true;
+  const setup = await api('/setup').catch(() => ({}));
+  if (setup.needs_setup) return viewSetup(el, setup);
   el.innerHTML = `
     <div class="card login">
       <h1>Vanagopal Enclave<br><span class="muted" style="font-size:.95rem;font-weight:400">Maintenance accounts</span></h1>
@@ -120,6 +122,36 @@ async function viewLogin(el) {
       await api('/login', { method: 'POST', body: Object.fromEntries(fd) });
       me = await api('/me');
       route(me.must_change_password ? '#/account' : '#/');
+    } catch (err) { $('#err').textContent = err.message; }
+  });
+}
+
+async function viewSetup(el, setup) {
+  if (!setup.setup_enabled) {
+    el.innerHTML = `<div class="card login"><h1>Setup required</h1>
+      <p>No admin account exists yet. Set the <code>SETUP_TOKEN</code> environment variable on the server,
+      or run <code>npm run create-admin</code>, then reload this page.</p></div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="card login">
+      <h1>Create the first admin</h1>
+      <p class="muted">This screen only works once. After an admin exists, it is disabled.</p>
+      <form id="f">
+        <label>Setup code <input name="setup_token" required autocomplete="off"></label>
+        <label>Your name <input name="display_name" required></label>
+        <label>Username <input name="username" required pattern="[a-zA-Z0-9._\\-]{3,32}" autocomplete="username"></label>
+        <label>Password (min 8 chars) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+        <div class="err" id="err"></div>
+        <button class="btn primary">Create admin & sign in</button>
+      </form>
+    </div>`;
+  $('#f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/setup', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+      me = await api('/me');
+      route('#/');
     } catch (err) { $('#err').textContent = err.message; }
   });
 }
